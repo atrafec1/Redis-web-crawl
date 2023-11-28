@@ -1,38 +1,50 @@
 import redis
-import mechanicalsoup as ms
+import mechanicalsoup
+import configparser 
+from elasticsearch import Elasticsearch, helpers
 
-r = redis.Redis()
-browser = ms.StatefulBrowser()
-start_url = "https://en.wikipedia.org/wiki/Redis"
-r.lpush("links", start_url)
-def crawl(browser, r, url):
-#Download url
+config = configparser.ConfigParser()
+config.read('elastic.ini')
+print(config.read('elastic.ini'))
+
+es = Elasticsearch(
+    cloud_id= config['ELASTIC']['cloud_id'],
+    http_auth=(config['ELASTIC']['user'], config['ELASTIC']['password'])
+)
+
+def write_to_elastic(es, url, html):
+    link = url.decode('utf-8')
+    es.index(
+        index= 'webpages', 
+        document={
+            'url': link,
+            'html': html
+        }
+    )
+
+def crawl(browser, r, es, url):
+    print(url)
     browser.open(url)
-# Parse for more urls
-    a_tags = browser.page.find_all("a")
-    hrefs = [ a.get("href") for a in a_tags ]
-    wikipedia_domain = "https://en.wikipedia.org"
-    links = [ wikipedia_domain + a for a in hrefs if a and a.startswith("/wiki/")]
-# Put urls in Redis queue
-#create a linked list in Redis, call it “links”
+
+    #cache to elastic 
+    write_to_elastic(es, url, str(browser.page))
+
+    #get links
+    links = browser.page.find_all("a")
+    hrefs = [a.get("href") for a in links]
+
+    # Do filtering
+    domain = "https://en.wikipedia.org"
+    links = [domain + a for a in hrefs if a and a.startswith("/wiki/")]
+
+    print("pushing links to redis")
     r.lpush("links", *links)
-    link = r.rpop("links")
-    if "Jesus" in str(link):
-        print(link)
-        print("FOUND JESUS")
-        return
-    else:
-        print("CRAWL")
-        crawl(browser, r, link)
 
-    
+start_url = "https://en.wikipedia.org/wiki/Redis"
+r = redis.Redis()
+browser = mechanicalsoup.StatefulBrowser()
 
+r.lpush("links", start_url)
 
-crawl(browser, r, start_url)
-
-#In terminal
-# ps aux | grep redis
-# brew services list
-# redis-cli
-# rpop links
-
+while link := r.rpop("links"):
+    crawl(browser, r, es, link)
