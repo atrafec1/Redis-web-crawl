@@ -1,16 +1,34 @@
-import redis
+import sqlite3
 import mechanicalsoup
 import configparser
-from elasticsearch import Elasticsearch
 from neo4j import GraphDatabase
+import redis
 
 config = configparser.ConfigParser()
-config.read('elastic.ini')
+config.read('database.ini')  # Update with your database configuration
 
-es = Elasticsearch(
-    cloud_id=config['ELASTIC']['cloud_id'],
-    basic_auth=(config['ELASTIC']['user'], config['ELASTIC']['password'])
-)
+class SQLiteDriver:
+    def __init__(self, db_path):
+        self._connection = sqlite3.connect(db_path)
+        self._cursor = self._connection.cursor()
+        self._create_table()
+
+    def _create_table(self):
+        self._cursor.execute('''
+            CREATE TABLE IF NOT EXISTS webpages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                url TEXT,
+                html TEXT
+            )
+        ''')
+        self._connection.commit()
+
+    def write_to_db(self, url, html):
+        self._cursor.execute('INSERT INTO webpages (url, html) VALUES (?, ?)', (url, html))
+        self._connection.commit()
+
+    def close(self):
+        self._connection.close()
 
 class Neo4jDriver:
     def __init__(self, uri, user, password):
@@ -31,22 +49,12 @@ class Neo4jDriver:
             to_url=to_url
         )
 
-def write_to_elastic(es, url, html):
-    link = url.decode('utf-8')
-    es.index(
-        index='webpages',
-        document={
-            'url': link,
-            'html': html
-        }
-    )
-
-def crawl(browser, r, es, neo4j_driver, url):
+def crawl(browser, r, sqlite_driver, neo4j_driver, url):
     print(url)
     browser.open(url)
 
-    # Cache to elastic
-    write_to_elastic(es, url, str(browser.page))
+    # Cache to SQLite
+    write_to_db(url, str(browser.page))
 
     # Create node in Neo4j
     with neo4j_driver._driver.session() as session:
@@ -66,10 +74,17 @@ def crawl(browser, r, es, neo4j_driver, url):
         with neo4j_driver._driver.session() as session:
             session.write_transaction(neo4j_driver.create_relationship, url, link)
 
+def write_to_db(url, html):
+    sqlite_driver.write_to_db(url, html)
+
 # Neo4j connection details
 neo4j_uri = "bolt://localhost:7689"
 neo4j_user = "neo4j"
 neo4j_password = "5ppu3nf9aml"
+
+# SQLite database connection details
+sqlite_db_path = "webpages.db"  # Update with your desired SQLite database path
+sqlite_driver = SQLiteDriver(sqlite_db_path)
 
 # Start URL and initialization
 start_url = "https://en.wikipedia.org/wiki/Redis"
@@ -80,7 +95,8 @@ neo4j_driver = Neo4jDriver(neo4j_uri, neo4j_user, neo4j_password)
 r.lpush("links", start_url)
 
 while link := r.rpop("links"):
-    crawl(browser, r, es, neo4j_driver, link)
+    crawl(browser, r, sqlite_driver, neo4j_driver, link)
 
-# Close Neo4j driver
+# Close SQLite and Neo4j drivers
+sqlite_driver.close()
 neo4j_driver.close()
